@@ -63,14 +63,15 @@ define([
             _oldProvider = _model.getVideo();
 
             // Keep track of the original player state
-            _oldpos = _model.position;
+            _oldpos = _model.get('position');
 
             // Initialize the instream player's model copied from main player's model
             _adModel = new Model().setup({
                 id: _model.id,
-                volume: _model.volume,
-                fullscreen: _model.fullscreen,
-                mute: _model.mute
+                volume: _model.get('volume'),
+                primary : _model.get('primary'),
+                fullscreen: _model.get('fullscreen'),
+                mute: _model.get('mute')
             });
 
             _adModel.on('fullscreenchange', _nativeFullscreenHandler);
