@@ -35,6 +35,7 @@ define([
         var _flashProviderType;
         var _attached = true;
         var _fullscreen = false;
+        var _this = this;
 
         var _ready = function() {
             return _swf && _swf.__ready;
@@ -55,8 +56,8 @@ define([
                     var level = levels[i];
                     if (level.bitrate) {
                         // get label with nearest rate match
-                        var sourceKBps = Math.round(level.bitrate / 1024);
-                        level.label = _getNearestCustomLabel(sourceKBps);
+                        var sourceKbps = Math.round(level.bitrate / 1000);
+                        level.label = _getNearestCustomLabel(sourceKbps);
                     }
                 }
             }
@@ -111,6 +112,26 @@ define([
             };
         }
 
+        function checkFlashBlocked() {
+            _flashBlockedTimeout = setTimeout(function() {
+                Events.trigger.call(_this, 'flashBlocked');
+            }, 4000);
+            _swf.once('embedded', function() {
+                removeBlockedCheck();
+                Events.trigger.call(_this, 'flashUnblocked');
+            }, _this);
+        }
+
+        function onFocus() {
+            removeBlockedCheck();
+            checkFlashBlocked();
+        }
+        
+        function removeBlockedCheck() {
+            clearTimeout(_flashBlockedTimeout);
+            window.removeEventListener('focus', onFocus);
+        }
+
         _.extend(this, Events, {
                 init: function(item) {
                     // if not preloading or autostart is true, do nothing
@@ -125,7 +146,10 @@ define([
                     _beforecompleted = false;
                     this.setState(states.LOADING);
                     _flashCommand('load', item);
-                    this.sendMediaType(item.sources);
+                    // HLS mediaType comes from the AdaptiveProvider
+                    if(item.sources.length && item.sources[0].type !== 'hls') {
+                        this.sendMediaType(item.sources);
+                    }
                 },
                 play: function() {
                     _flashCommand('play');
@@ -201,19 +225,16 @@ define([
 
                     _swf = this.getSwfObject(parent);
 
-                    // The browser may block the flash object until user enables it
-                    var _this = this;
-                    _flashBlockedTimeout = setTimeout(function() {
-                        Events.trigger.call(_this, 'flashBlocked');
-                    }, 4000);
-                    _swf.once('embedded', function() {
-                        clearTimeout(_flashBlockedTimeout);
-                        Events.trigger.call(_this, 'flashUnblocked');
-                    }, this);
+                    // Wait until the window gets focus to see check flash is blocked
+                    if (document.hasFocus()) {
+                        checkFlashBlocked();
+                    } else {
+                        window.addEventListener('focus', onFocus);
+                    }
 
                     // listen to events sendEvented from flash
                     _swf.once('ready', function() {
-                        clearTimeout(_flashBlockedTimeout);
+                        removeBlockedCheck();
                         // After plugins load, then execute commandqueue
                         _swf.once('pluginsLoaded', function() {
                             _swf.queueCommands = false;
@@ -244,7 +265,8 @@ define([
                         events.JWPLAYER_MEDIA_SEEKED,
                         'subtitlesTracks',
                         'subtitlesTrackChanged',
-                        'subtitlesTrackData'
+                        'subtitlesTrackData',
+                        'mediaType'
                     ];
 
                     var forwardEventsWithDataDuration = [
@@ -340,7 +362,7 @@ define([
 
                     if (flashThrottleTarget(_playerConfig)) {
                         _swf.on('throttle', function(e) {
-                            clearTimeout(_flashBlockedTimeout);
+                            removeBlockedCheck();
 
                             if (e.state === 'resume') {
                                 Events.trigger.call(_this, 'flashThrottle', e);
@@ -404,6 +426,7 @@ define([
                     _flashCommand('setCurrentAudioTrack', audioTrack);
                 },
                 destroy: function() {
+                    removeBlockedCheck();
                     this.remove();
                     if (_swf) {
                         _swf.off();
@@ -430,6 +453,10 @@ define([
     var F = function(){};
     F.prototype = DefaultProvider;
     FlashProvider.prototype = new F();
+
+    FlashProvider.getName = function() {
+        return { name : 'flash' };
+    };
 
     return FlashProvider;
 });

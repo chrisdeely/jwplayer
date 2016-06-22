@@ -8,23 +8,21 @@ define([
 ], function(parsers, rssParser, utils, events, Events, _) {
 
     var PlaylistLoader = function() {
-        var _this = _.extend(this, Events),
-            _xhr;
+        var _this = _.extend(this, Events);
 
         this.load = function(playlistfile) {
-            _xhr = utils.ajax(playlistfile, _playlistLoaded, _playlistLoadError);
+            utils.ajax(playlistfile, _playlistLoaded, _playlistLoadError);
         };
 
         this.destroy = function() {
             this.off();
-            _xhr = null;
         };
 
         function _playlistLoaded(loadedEvent) {
             var status = utils.tryCatch(function() {
                 var childNodes = loadedEvent.responseXML ? loadedEvent.responseXML.childNodes : null;
                 var rss = '';
-                var pl;
+                var jsonObj;
                 if (childNodes) {
                     for (var i = 0; i < childNodes.length; i++) {
                         rss = childNodes[i];
@@ -37,26 +35,29 @@ define([
                         rss = rss.nextSibling;
                     }
                     if (parsers.localName(rss) === 'rss') {
-                        pl = rssParser.parse(rss);
+                        jsonObj = { playlist: rssParser.parse(rss) };
                     }
                 }
 
                 // If the response is not valid RSS, check if it is JSON
-                if (!pl) {
+                if (!jsonObj) {
                     try {
-                        pl = JSON.parse(loadedEvent.responseText);
+                        var pl = JSON.parse(loadedEvent.responseText);
                         // If the response is not a JSON array, try to read playlist of the response
-                        if (!_.isArray(pl)) {
-                            pl = pl.playlist;
+                        if (_.isArray(pl)) {
+                            jsonObj = { playlist: pl };
+                        } else if (_.isArray(pl.playlist)) {
+                            jsonObj = pl;
+                        } else {
+                            throw null;
                         }
                     } catch (e) {
                         _playlistError('Not a valid RSS/JSON feed');
                         return;
                     }
                 }
-                _this.trigger(events.JWPLAYER_PLAYLIST_LOADED, {
-                    playlist: pl
-                });
+
+                _this.trigger(events.JWPLAYER_PLAYLIST_LOADED, jsonObj);
             });
 
             if (status instanceof utils.Error) {

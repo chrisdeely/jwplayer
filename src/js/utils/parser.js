@@ -1,8 +1,7 @@
 define([
     'utils/underscore',
-    'utils/validator',
-    'utils/trycatch'
-], function(_, validator, trycatch) {
+    'utils/validator'
+], function(_, validator) {
     var parser = {};
 
     /** Gets an absolute file path based on a relative filepath * */
@@ -63,9 +62,9 @@ define([
     /** Takes an XML string and returns an XML object **/
     parser.parseXML = function (input) {
         var parsedXML = null;
-        trycatch.tryCatch(function() {
+        try {
             // Parse XML in FF/Chrome/Safari/Opera
-            if (window.DOMParser) {
+            if ('DOMParser' in window) {
                 parsedXML = (new window.DOMParser()).parseFromString(input, 'text/xml');
                 // In Firefox the XML doc may contain the parsererror, other browsers it's further down
                 if (containsParserErrors(parsedXML.childNodes) ||
@@ -78,7 +77,7 @@ define([
                 parsedXML.async = 'false';
                 parsedXML.loadXML(input);
             }
-        });
+        } catch(e) {/* Expected when content is not XML */}
 
         return parsedXML;
     };
@@ -142,9 +141,9 @@ define([
      * Determine the adaptive type
      */
     parser.adaptiveType = function(duration) {
-        if (duration !== -1) {
+        if (duration !== 0) {
             var MIN_DVR_DURATION = -120;
-            if(duration <= MIN_DVR_DURATION) {
+            if (duration <= MIN_DVR_DURATION) {
                 return 'DVR';
             }
             if (duration < 0 || duration === Infinity) {

@@ -13,13 +13,18 @@ define([
     };
 
     /** Go through the playlist and choose a single playable type to play; remove sources of a different type **/
-    Playlist.filterPlaylist = function(playlist, providers, androidhls, configDrm, preload) {
+    Playlist.filterPlaylist = function(playlist, providers, androidhls, configDrm, preload, feedid, withCredentials) {
         var list = [];
 
         _.each(playlist, function(item) {
             item = _.extend({}, item);
-            item.allSources = _formatSources(item.sources, androidhls,
-                item.drm || configDrm, item.preload || preload);
+
+            item.allSources = _formatSources(item.sources,
+                androidhls,
+                item.drm || configDrm,
+                item.preload || preload,
+                _fallbackIfUndefined(item.withCredentials, withCredentials));
+
             item.sources = _filterSources(item.allSources, providers);
 
             if (!item.sources.length) {
@@ -34,13 +39,18 @@ define([
                 item.preload = item.preload || preload;
             }
 
+            // set feedid for the item, if it is defined
+            if (item.feedid || feedid) {
+                item.feedid = item.feedid || feedid;
+            }
+
             list.push(item);
         });
 
         return list;
     };
 
-    var _formatSources = function(sources, androidhls, itemDrm, preload) {
+    var _formatSources = function(sources, androidhls, itemDrm, preload, withCredentials) {
         return _.compact(_.map(sources, function(originalSource) {
             if (! _.isObject(originalSource)) {
                 return;
@@ -57,13 +67,14 @@ define([
                 originalSource.preload = originalSource.preload || preload;
             }
 
+            originalSource.withCredentials = _fallbackIfUndefined(originalSource.withCredentials, withCredentials);
+
             return Source(originalSource);
         }));
     };
 
     // A playlist item may have multiple different sources, but we want to stick with one.
     var _filterSources = function(sources, providers) {
-
         // legacy plugin support
         if (!providers || !providers.choose) {
             providers = new Providers({primary : providers ? 'flash' : null});
@@ -85,6 +96,10 @@ define([
         }
 
         return null;
+    }
+
+    function _fallbackIfUndefined(value, fallback) {
+        return _.isUndefined(value) ? fallback : value;
     }
 
     return Playlist;

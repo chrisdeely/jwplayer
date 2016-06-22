@@ -1,22 +1,24 @@
 define([
     'utils/css',
     'utils/helpers',
-    'utils/stretching',
+    'utils/dom',
     'utils/underscore',
     'events/events',
     'events/states',
     'providers/default',
-    'utils/backbone.events'
-], function(cssUtils, utils, stretchUtils, _, events, states, DefaultProvider, Events) {
+    'utils/backbone.events',
+    'providers/tracks-mixin'
+], function(cssUtils, utils, dom, _, events, states, DefaultProvider, Events, Tracks) {
 
     var clearTimeout = window.clearTimeout,
         STALL_DELAY = 256,
+        _isIE = utils.isIE(),
         _isMSIE = utils.isMSIE(),
         _isMobile = utils.isMobile(),
-        _isSafari = utils.isSafari(),
         _isFirefox = utils.isFF(),
         _isAndroid = utils.isAndroidNative(),
         _isIOS7 = utils.isIOS(7),
+        _isIOS8 = utils.isIOS(8),
         _name = 'html5';
 
 
@@ -59,7 +61,7 @@ define([
         // Are we buffering due to seek, or due to playback?
         this.seeking = false;
 
-        _.extend(this, Events);
+        _.extend(this, Events, Tracks);
 
         // Overwrite the event dispatchers to block on certain occasions
         this.trigger = function(type, args) {
@@ -86,8 +88,8 @@ define([
                 error: _errorHandler,
 
                 //play: _onPlayHandler, // play is attempted, but hasn't necessarily started
-                //loadstart: _generalHandler,
-                //loadeddata: _onLoadedData, // we have duration
+                loadstart: _onLoadStart,
+                loadeddata: _onLoadedData, // we have video tracks (text, audio, metadata)
                 loadedmetadata: _loadedMetadataHandler, // we have video dimensions
                 canplay: _canPlayHandler,
                 playing: _playingHandler,
@@ -96,7 +98,7 @@ define([
 
                 pause: _pauseHandler,
                 //ratechange: _generalHandler,
-                //readystatechange: _generalHandler,
+                //readystatechange: _readyStateHandler,
                 seeked: _seekedHandler,
                 //seeking: _seekingHandler,
                 //stalled: _stalledHandler,
@@ -110,8 +112,6 @@ define([
             },
             // DOM container
             _container,
-            // Currently playing source
-            _source,
             // Current duration
             _duration,
             // Current position
@@ -132,20 +132,36 @@ define([
             _levels,
             // Current quality level index
             _currentQuality = -1,
-
             // android hls doesn't update currentTime so we want to skip the stall check since it always fails
             _isAndroidHLS = null,
-
+            // mobile sdk configuration
+            _isSDK = !!_playerConfig.sdkplatform,
             // post roll support
             _beforecompleted = false,
-
-            _fullscreenState = false;
+            // webkit fullscreen media element state
+            _fullscreenState = false,
+            // MediaElement Tracks
+            _audioTracks = null,
+            _currentAudioTrackIndex = -1,
+            _activeCuePosition = -1,
+            _itemTracks = null,
+            _visualQuality = { level: {} };
 
         // Find video tag, or create it if it doesn't exist.  View may not be built yet.
         var element = document.getElementById(_playerId);
         var _videotag = (element) ? element.querySelector('video') : undefined;
         _videotag = _videotag || document.createElement('video');
         _videotag.className = 'jw-video jw-reset';
+
+        this.isSDK = _isSDK;
+        this.itemTracks = _itemTracks;
+        this.video = _videotag;
+
+        // prevent browser from showing second cast icon
+        // https://w3c.github.io/remote-playback/
+        if (_.isObject(_playerConfig.cast) && _playerConfig.cast.appid) {
+            _videotag.setAttribute('disableRemotePlayback', '');
+        }
 
         _setupListeners(_mediaEvents, _videotag);
 
@@ -159,17 +175,33 @@ define([
         _videotag.setAttribute('x-webkit-airplay', 'allow');
         _videotag.setAttribute('webkit-playsinline', '');
 
+        // Enable tracks support for HLS videos
+        function _onLoadedData() {
+            if (!_attached) {
+                return;
+            }
+            _setAudioTracks(_videotag.audioTracks);
+            _this.setTextTracks(_videotag.textTracks);
+            _videotag.setAttribute('jw-loaded', 'data');
+        }
+
+        function _onLoadStart() {
+            if (!_attached) {
+                return;
+            }
+            _videotag.setAttribute('jw-loaded', 'started');
+        }
+
         function _clickHandler(evt) {
             _this.trigger('click', evt);
         }
 
         function _durationChangeHandler() {
-            if (!_attached) {
+            if (!_attached || _isAndroidHLS) {
                 return;
             }
-
-            _setBuffered(_getBuffer(), _position, _videotag.duration);
-            _setDuration(_videotag.duration);
+            _updateDuration(_getDuration());
+            _setBuffered(_getBuffer(), _position, _duration);
         }
 
         function _progressHandler() {
@@ -191,8 +223,11 @@ define([
             } else if (_this.state === states.PLAYING) {
                 _playbackTimeout = setTimeout(_checkPlaybackStalled, STALL_DELAY);
             }
-
-            _setDuration(_videotag.duration);
+            // When video has not yet started playing for androidHLS, we cannot get the correct duration
+            if (_isAndroidHLS && (_videotag.duration === Infinity) && (_videotag.currentTime === 0)) {
+                return;
+            }
+            _updateDuration(_getDuration());
             _setPosition(_videotag.currentTime);
             // buffer ranges change during playback, not just on file progress
             _setBuffered(_getBuffer(), _position, _duration);
@@ -203,6 +238,28 @@ define([
                     position: _position,
                     duration: _duration
                 });
+
+                _checkVisualQuality();
+            }
+        }
+
+        function _checkVisualQuality() {
+            var level = _visualQuality.level;
+            if (level.width !== _videotag.videoWidth ||
+                level.height !== _videotag.videoHeight) {
+                level.width = _videotag.videoWidth;
+                level.height = _videotag.videoHeight;
+                _setMediaType();
+                if (!level.width || !level.height) {
+                    return;
+                }
+                _visualQuality.reason = _visualQuality.reason || 'auto';
+                _visualQuality.mode = _levels[_currentQuality].type === 'hls' ? 'auto' : 'manual';
+                _visualQuality.bitrate = 0;
+                level.index = _currentQuality;
+                level.label = _levels[_currentQuality].label;
+                _this.trigger('visualQuality', _visualQuality);
+                _visualQuality.reason = '';
             }
         }
 
@@ -218,23 +275,43 @@ define([
         }
 
         function _setPosition(currentTime) {
+            if (_duration < 0) {
+                currentTime = -(_getSeekableEnd() - currentTime);
+            }
             _position = currentTime;
         }
-
-        function _setDuration(duration) {
+        
+        function _getDuration() {
+            var duration = _videotag.duration;
+            var end = _getSeekableEnd();
+            if (duration === Infinity && end) {
+                var seekableDuration = end - _videotag.seekable.start(0);
+                if (seekableDuration !== Infinity && seekableDuration > 120) {
+                    // Player interprets negative duration as DVR
+                    duration = -seekableDuration;
+                }
+            }
+            return duration;
+        }
+        
+        function _updateDuration(duration) {
             _duration = duration;
-            if (_delayedSeek > 0 && _duration > _delayedSeek) {
+            if (_delayedSeek && duration && duration !== Infinity) {
                 _this.seek(_delayedSeek);
             }
         }
 
         function _sendMetaEvent() {
+            var duration = _getDuration();
+            if (_isAndroidHLS && duration === Infinity) {
+                duration = 0;
+            }
             _this.trigger(events.JWPLAYER_MEDIA_META, {
-                duration: _videotag.duration,
+                duration: duration,
                 height: _videotag.videoHeight,
                 width: _videotag.videoWidth
             });
-            _setDuration(_videotag.duration);
+            _updateDuration(duration);
         }
 
         function _canPlayHandler() {
@@ -243,6 +320,9 @@ define([
             }
 
             _canSeek = true;
+            if (!_isAndroidHLS) {
+                _setMediaType();
+            }
             _sendBufferFull();
         }
 
@@ -256,6 +336,7 @@ define([
                 _videotag.muted = false;
                 _videotag.muted = true;
             }
+            _videotag.setAttribute('jw-loaded', 'meta');
             _sendMetaEvent();
         }
 
@@ -268,6 +349,9 @@ define([
 
         function _playingHandler() {
             _this.setState(states.PLAYING);
+            if(!_videotag.hasAttribute('jw-played')) {
+                _videotag.setAttribute('jw-played','');
+            }
             _this.trigger(events.JWPLAYER_PROVIDER_FIRST_FRAME, {});
         }
 
@@ -313,7 +397,7 @@ define([
                 return;
             }
 
-            utils.log('Error playing media: %o %s', _videotag.error, _videotag.src || _source.file);
+            utils.log('Error playing media: %o %s', _videotag.error, _videotag.src);
             _this.trigger(events.JWPLAYER_MEDIA_ERROR, {
                 message: 'Error loading media: File could not be played'
             });
@@ -357,30 +441,32 @@ define([
                     }
                 }
             }
+            _visualQuality.reason = 'initial choice';
+            _visualQuality.level = {};
             return currentQuality;
-        }
-
-        function _forceVideoLoad() {
-            // These browsers will not replay videos without reloading them
-            return (_isMobile || _isSafari);
         }
 
         function _completeLoad(startTime, duration) {
 
-            _source = _levels[_currentQuality];
-
             _delayedSeek = 0;
             clearTimeout(_playbackTimeout);
 
-            var sourceChanged = (_videotag.src !== _source.file);
-            if (sourceChanged || _forceVideoLoad()) {
+            var sourceElement = document.createElement('source');
+            sourceElement.src = _levels[_currentQuality].file;
+            var sourceChanged = (_videotag.src !== sourceElement.src);
+
+            var loadedSrc = _videotag.getAttribute('jw-loaded');
+
+            var hasPlayed = _videotag.hasAttribute('jw-played');
+
+            if (sourceChanged || loadedSrc === 'none' || loadedSrc === 'started') {
                 _duration = duration;
-                _setVideotagSource();
+                _setVideotagSource(_levels[_currentQuality]);
+                _this.setupSideloadedTracks(_itemTracks);
                 _videotag.load();
-                //_videotag.currentTime = 0;
             } else {
                 // Load event is from the same video as before
-                if (startTime === 0 && _videotag.currentTime !== 0) {
+                if (startTime === 0 && _videotag.currentTime > 0) {
                     // restart video without dispatching seek event
                     _delayedSeek = -1;
                     _this.seek(startTime);
@@ -391,7 +477,7 @@ define([
 
             _position = _videotag.currentTime;
 
-            if (_isMobile) {
+            if (_isMobile && !hasPlayed) {
                 // results in html5.controller calling video.play()
                 _sendBufferFull();
                 // If we're still paused, then the tag isn't loading yet due to mobile interaction restrictions.
@@ -410,14 +496,67 @@ define([
             }
         }
 
-        function _setVideotagSource() {
+        function _setVideotagSource(source) {
+            _audioTracks = null;
+            _currentAudioTrackIndex = -1;
+            _activeCuePosition = -1;
+            if (!_visualQuality.reason) {
+                _visualQuality.reason = 'initial choice';
+                _visualQuality.level = {};
+            }
             _canSeek = false;
             _bufferFull = false;
-            _isAndroidHLS = _useAndroidHLS(_source);
-            _videotag.src = _source.file;
-            if (_source.preload) {
-                _videotag.setAttribute('preload', _source.preload);
+            _isAndroidHLS = _useAndroidHLS(source);
+            if (source.preload && source.preload !== _videotag.getAttribute('preload')) {
+                _videotag.setAttribute('preload', source.preload);
             }
+
+            var sourceElement = document.createElement('source');
+            sourceElement.src = source.file;
+            var sourceChanged = (_videotag.src !== sourceElement.src);
+            if (sourceChanged) {
+                _videotag.setAttribute('jw-loaded', 'none');
+                _videotag.src = source.file;
+            }
+        }
+
+        function _clearVideotagSource() {
+            if (_videotag) {
+                _this.disableTextTrack();
+                _videotag.removeAttribute('crossorigin');
+                _videotag.removeAttribute('preload');
+                _videotag.removeAttribute('src');
+                _videotag.removeAttribute('jw-loaded');
+                _videotag.removeAttribute('jw-played');
+
+                dom.emptyElement(_videotag);
+                _currentQuality = -1;
+                _itemTracks = null;
+                // Don't call load in iE9/10 and check for load in PhantomJS
+                if (!_isMSIE && 'load' in _videotag) {
+                    _videotag.load();
+                }
+            }
+        }
+
+        function _getSeekableStart() {
+            var index = _videotag.seekable ? _videotag.seekable.length : 0;
+            var start = Infinity;
+
+            while(index--) {
+                start = Math.min(start, _videotag.seekable.start(index));
+            }
+            return start;
+        }
+
+        function _getSeekableEnd() {
+            var index = _videotag.seekable ? _videotag.seekable.length : 0;
+            var end = 0;
+
+            while(index--) {
+                end = Math.max(end, _videotag.seekable.end(index));
+            }
+            return end;
         }
 
         this.stop = function() {
@@ -425,23 +564,20 @@ define([
             if (!_attached) {
                 return;
             }
-            _videotag.removeAttribute('src');
-            if (!_isMSIE) {
-                _videotag.load();
-            }
+            _clearVideotagSource();
             // IE may continue to play a video after changing source and loading a new media file.
             // https://connect.microsoft.com/IE/feedbackdetail/view/2000141/htmlmediaelement-autoplays-after-src-is-changed-and-load-is-called
             if(utils.isIETrident()) {
                 _videotag.pause();
             }
-            _currentQuality = -1;
             this.setState(states.IDLE);
         };
 
 
         this.destroy = function() {
              _removeListeners(_mediaEvents, _videotag);
-
+            this.removeTracksListener(_videotag.audioTracks, 'change', _audioTrackChangeHandler);
+            this.removeTracksListener(_videotag.textTracks, 'change', _this.textTrackChangeHandler);
             this.remove();
             this.off();
         };
@@ -450,15 +586,20 @@ define([
             if (!_attached) {
                 return;
             }
-
+            _itemTracks = null;
             _levels = item.sources;
             _currentQuality = _pickInitialQuality(item.sources);
-            this.sendMediaType(item.sources);
+            // the loadeddata event determines the mediaType for HLS sources
+            if(item.sources.length && item.sources[0].type !== 'hls') {
+                this.sendMediaType(item.sources);
+            }
 
-            _source = _levels[_currentQuality];
             _position = item.starttime || 0;
             _duration = item.duration || 0;
-            _setVideotagSource(item);
+            _visualQuality.reason = '';
+            _setVideotagSource(_levels[_currentQuality]);
+            this.setupSideloadedTracks(item.tracks);
+            _itemTracks = this.itemTracks;
         };
 
         this.load = function(item) {
@@ -467,10 +608,12 @@ define([
             }
 
             _setLevels(item.sources);
-            this.sendMediaType(item.sources);
 
-            if (!_isMobile) {
-                // don't change state on mobile because a touch event may be required to start playback
+            if(item.sources.length && item.sources[0].type !== 'hls') {
+                this.sendMediaType(item.sources);
+            }
+            if (!_isMobile || _videotag.hasAttribute('jw-played')) {
+                // don't change state on mobile before user initiates playback
                 _this.setState(states.LOADING);
             }
             _completeLoad(item.starttime || 0, item.duration || 0);
@@ -496,21 +639,27 @@ define([
                 return;
             }
 
+            if (seekPos < 0) {
+                seekPos += _getSeekableStart() + _getSeekableEnd();
+            }
+
             if (_delayedSeek === 0) {
                 this.trigger(events.JWPLAYER_MEDIA_SEEK, {
                     position: _videotag.currentTime,
                     offset: seekPos
                 });
             }
-
+            if (!_canSeek) {
+                _canSeek = !!_getSeekableEnd();
+            }
             if (_canSeek) {
                 _delayedSeek = 0;
-                // handle readystate issue
-                var status = utils.tryCatch(function() {
+                // setting currentTime can throw an invalid DOM state exception if the video is not ready
+                try {
                     _this.seeking = true;
                     _videotag.currentTime = seekPos;
-                });
-                if (status instanceof utils.Error) {
+                } catch(e) {
+                    _this.seeking = false;
                     _delayedSeek = seekPos;
                 }
             } else {
@@ -601,6 +750,17 @@ define([
             }
         }
 
+        function _audioTrackChangeHandler() {
+            var _selectedAudioTrackIndex = -1;
+            for (var i = 0; i < _videotag.audioTracks.length; i++) {
+                if (_videotag.audioTracks[i].enabled) {
+                    _selectedAudioTrackIndex = i;
+                    break;
+                }
+            }
+            _setCurrentAudioTrack(_selectedAudioTrackIndex);
+        }
+
         function _fullscreenEndHandler(e) {
             _fullscreenState = false;
             _sendFullscreen(e);
@@ -625,6 +785,7 @@ define([
          */
         this.detachMedia = function() {
             clearTimeout(_playbackTimeout);
+            this.disableTextTrack();
             _attached = false;
             return _videotag;
         };
@@ -632,11 +793,9 @@ define([
         /**
          * Begin listening to events again
          */
-        this.attachMedia = function(seekable) {
+        this.attachMedia = function() {
             _attached = true;
-            if (!seekable) {
-                _canSeek = false;
-            }
+            _canSeek = false;
 
             // If we were mid-seek when detached, we want to allow it to resume
             this.seeking = false;
@@ -661,16 +820,8 @@ define([
 
         this.remove = function() {
             // stop video silently
-            if (_videotag) {
-                _videotag.removeAttribute('src');
-                if (!_isMSIE) {
-                    _videotag.load();
-                }
-            }
-
+            _clearVideotagSource();
             clearTimeout(_playbackTimeout);
-
-            _currentQuality = -1;
 
             // remove
             if (_container === _videotag.parentNode) {
@@ -698,17 +849,55 @@ define([
         };
 
         this.resize = function(width, height, stretching) {
-            return stretchUtils.stretch(stretching,
-                _videotag,
-                width, height,
-                _videotag.videoWidth, _videotag.videoHeight);
+            if (!width || !height || !_videotag.videoWidth || !_videotag.videoHeight) {
+                return false;
+            }
+            var style = {
+                objectFit: ''
+            };
+            if (stretching === 'uniform') {
+                // snap video to edges when the difference in aspect ratio is less than 9%
+                var playerAspectRatio = width / height;
+                var videoAspectRatio = _videotag.videoWidth / _videotag.videoHeight;
+                if (Math.abs(playerAspectRatio - videoAspectRatio) < 0.09) {
+                    style.objectFit = 'fill';
+                    stretching = 'exactfit';
+                }
+            }
+            // Prior to iOS 9, object-fit worked poorly
+            // object-fit is not implemented in IE or Android Browser in 4.4 and lower
+            // http://caniuse.com/#feat=object-fit
+            // feature detection may work for IE but not for browsers where object-fit works for images only
+            var fitVideoUsingTransforms = _isIE || _isAndroid || _isIOS7 || _isIOS8;
+            if (fitVideoUsingTransforms) {
+                // Use transforms to center and scale video in container
+                var x = - Math.floor(_videotag.videoWidth  / 2 + 1);
+                var y = - Math.floor(_videotag.videoHeight / 2 + 1);
+                var scaleX = Math.ceil(width  * 100 / _videotag.videoWidth)  / 100;
+                var scaleY = Math.ceil(height * 100 / _videotag.videoHeight) / 100;
+                if (stretching === 'none') {
+                    scaleX = scaleY = 1;
+                } else if (stretching === 'fill') {
+                    scaleX = scaleY = Math.max(scaleX, scaleY);
+                } else if (stretching === 'uniform') {
+                    scaleX = scaleY = Math.min(scaleX, scaleY);
+                }
+                style.width  = _videotag.videoWidth;
+                style.height = _videotag.videoHeight;
+                style.top = style.left = '50%';
+                style.margin  = 0;
+                cssUtils.transform(_videotag,
+                    'translate(' + x + 'px, ' + y + 'px) scale(' + scaleX.toFixed(2) + ', ' + scaleY.toFixed(2) + ')');
+            }
+            cssUtils.style(_videotag, style);
+            return false;
         };
 
         this.setFullscreen = function(state) {
             state = !!state;
 
             // This implementation is for iOS and Android WebKit only
-            // This won't get called if the player contain can go fullscreen
+            // This won't get called if the player container can go fullscreen
             if (state) {
                 var status = utils.tryCatch(function() {
                     var enterFullscreen =
@@ -747,10 +936,11 @@ define([
             if (_currentQuality === quality) {
                 return;
             }
-            quality = parseInt(quality, 10);
             if (quality >= 0) {
                 if (_levels && _levels.length > quality) {
                     _currentQuality = quality;
+                    _visualQuality.reason = 'api';
+                    _visualQuality.level = {};
                     this.trigger(events.JWPLAYER_MEDIA_LEVEL_CHANGED, {
                         currentQuality: quality,
                         levels: _getPublicLevels(_levels)
@@ -782,6 +972,71 @@ define([
         this.getName = function() {
             return { name : _name };
         };
+        this.setCurrentAudioTrack = _setCurrentAudioTrack;
+
+        this.getAudioTracks = _getAudioTracks;
+
+        this.getCurrentAudioTrack = _getCurrentAudioTrack;
+
+        function _setAudioTracks(tracks) {
+            _audioTracks = null;
+            if (!tracks) {
+                return;
+            }
+            if (tracks.length) {
+                for (var i = 0; i < tracks.length; i++) {
+                    if (tracks[i].enabled) {
+                        _currentAudioTrackIndex = i;
+                        break;
+                    }
+                }
+                if(_currentAudioTrackIndex === -1) {
+                    _currentAudioTrackIndex = 0;
+                    tracks[_currentAudioTrackIndex].enabled = true;
+                }
+                _audioTracks = _.map(tracks, function(track) {
+                    var _track = {
+                        name: track.label || track.language,
+                        language: track.language
+                    };
+                    return _track;
+                });
+            }
+            _this.addTracksListener(tracks, 'change', _audioTrackChangeHandler);
+            if (_audioTracks) {
+                _this.trigger('audioTracks', { currentTrack: _currentAudioTrackIndex, tracks: _audioTracks });
+            }
+        }
+
+        function _setCurrentAudioTrack(index) {
+            if (_videotag && _videotag.audioTracks && _audioTracks &&
+                index > -1 && index < _videotag.audioTracks.length && index !== _currentAudioTrackIndex) {
+                _videotag.audioTracks[_currentAudioTrackIndex].enabled = false;
+                _currentAudioTrackIndex = index;
+                _videotag.audioTracks[_currentAudioTrackIndex].enabled = true;
+                _this.trigger('audioTrackChanged', { currentTrack: _currentAudioTrackIndex,
+                    tracks: _audioTracks });
+            }
+        }
+
+        function _getAudioTracks() {
+            return _audioTracks || [];
+        }
+
+        function _getCurrentAudioTrack() {
+            return _currentAudioTrackIndex;
+        }
+
+        function _setMediaType() {
+            // Send mediaType when format is HLS. Other types are handled earlier by default.js.
+            if(_levels[0].type === 'hls') {
+                var mediaType = 'video';
+                if (_videotag.videoHeight === 0) {
+                    mediaType = 'audio';
+                }
+                _this.trigger('mediaType', {mediaType: mediaType});
+            }
+        }
     }
 
     // Register provider
@@ -789,6 +1044,9 @@ define([
     F.prototype = DefaultProvider;
     VideoProvider.prototype = new F();
 
-    return VideoProvider;
+    VideoProvider.getName = function() {
+        return { name : 'html5' };
+    };
 
+    return VideoProvider;
 });

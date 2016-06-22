@@ -4,9 +4,13 @@ define([
 ], function(_, utils) {
 
     var jwplayer = window.jwplayer;
-    var storage = window.localStorage || {
-            removeItem: utils.noop
-        };
+    var storage = {
+        removeItem: utils.noop
+    };
+
+    try {
+        storage = window.localStorage;
+    } catch(e) {/* ignore */}
 
     function jwPrefix(str) {
         return 'jwplayer.' + str;
@@ -39,11 +43,16 @@ define([
         });
     }
 
-    function Storage() { }
+    function Storage() {
+        this.persistItems = [
+            'volume',
+            'mute',
+            'captionLabel',
+            'qualityLabel'
+        ];
+    }
 
-    function track(persistItems, model) {
-        this.persistItems = persistItems;
-
+    function track(model) {
         _.each(this.persistItems, function(item) {
             model.on('change:' + item, function(model, value) {
                 setItem(item, value);

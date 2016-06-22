@@ -3,7 +3,8 @@ define([
 ], function (parser) {
     /* jshint qunit: true */
 
-    module('parser');
+    QUnit.module('parser');
+    var test = QUnit.test.bind(QUnit);
 
     var testerGenerator = function (assert, method) {
         return function (left, right, message) {
@@ -60,7 +61,7 @@ define([
 
     test('parser.getScriptPath', function(assert) {
         var path = parser.getScriptPath(null);
-        assert.notOk(path);
+        assert.equal(path, '', 'returns an empty string when no file name is provided');
 
         var scriptPath = parser.getScriptPath('parser-test.js');
         assert.ok(/\S+\:\/\/.+\/$/.test(scriptPath),
@@ -102,8 +103,8 @@ define([
     });
 
     test('parser.adaptiveType', function(assert) {
-        var type = parser.adaptiveType(-1);
-        assert.equal(type, 'VOD', 'adaptiveType with -1');
+        var type = parser.adaptiveType(0);
+        assert.equal(type, 'VOD', 'adaptiveType with 0');
 
         type = parser.adaptiveType(10);
         assert.equal(type, 'VOD', 'adaptiveType with 10');
@@ -113,6 +114,9 @@ define([
 
         type = parser.adaptiveType(-20);
         assert.equal(type, 'LIVE', 'adaptiveType with -20');
+
+        type = parser.adaptiveType(-1);
+        assert.equal(type, 'LIVE', 'adaptiveType with -1');
 
         type = parser.adaptiveType(Infinity);
         assert.equal(type, 'LIVE', 'adaptiveType with Infinity');

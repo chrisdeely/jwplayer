@@ -2,6 +2,7 @@ define([
     'utils/helpers',
     'utils/underscore',
     'utils/backbone.events',
+    'utils/constants',
     'utils/ui',
     'view/components/slider',
     'view/components/timeslider',
@@ -9,7 +10,7 @@ define([
     'view/components/playlist',
     'view/components/volumetooltip',
     'view/components/drawer'
-], function(utils, _, Events, UI, Slider, TimeSlider, Menu, Playlist, VolumeTooltip, Drawer) {
+], function(utils, _, Events, Constants, UI, Slider, TimeSlider, Menu, Playlist, VolumeTooltip, Drawer) {
 
     function button(icon, apiAction) {
         var element = document.createElement('div');
@@ -256,9 +257,9 @@ define([
 
             new UI(this.elements.duration).on('click tap', function(){
                 if (utils.adaptiveType(this._model.get('duration')) === 'DVR') {
-                    // -0.1 places the playhead at the most recent time.
-                    // this._api.seek(0) puts the user at the oldest DVR segment available.
-                    this._api.seek(-0.1);
+                    // Seek to "Live" position within live buffer, but not before current position
+                    var currentPosition = this._model.get('position');
+                    this._api.seek(Math.max(Constants.dvrSeekLimit, currentPosition));
                 }
             }, this);
 
@@ -279,7 +280,7 @@ define([
 
         onCaptionsList: function(model, tracks) {
             var index = model.get('captionsIndex');
-            this.elements.cc.setup(tracks, index);
+            this.elements.cc.setup(tracks, index, {isToggle: true});
             this.clearCompactMode();
         },
         onCaptionsIndex: function(model, index) {
@@ -305,7 +306,6 @@ define([
             if (this.elements.playlist) {
                 this.elements.playlist.selectItem(itemIdx);
             }
-
             this.elements.audiotracks.setup();
         },
 

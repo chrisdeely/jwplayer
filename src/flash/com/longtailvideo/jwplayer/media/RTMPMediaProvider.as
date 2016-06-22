@@ -205,10 +205,14 @@ public class RTMPMediaProvider extends MediaProvider {
             return;
         }
         _video.attachNetStream(_stream);
+        clearInterval(_interval);
+        _interval = setInterval(positionInterval, 100);
         if (_isPaused) {
+            _isPaused = false;
             // Resume VOD and restart live stream
             if (isVOD(_item.duration)) {
                 _stream.resume();
+                setState(PlayerState.PLAYING);
             } else {
                 _stream.play(_levels[_level].id);
                 setState(PlayerState.BUFFERING);
@@ -217,9 +221,6 @@ public class RTMPMediaProvider extends MediaProvider {
             // Start stream.
             _stream.play(_levels[_level].id);
         }
-        _isPaused = false;
-        clearInterval(_interval);
-        _interval = setInterval(positionInterval, 100);
     }
 
     /** Resize the Video and possible StageVideo. **/
@@ -679,6 +680,16 @@ public class RTMPMediaProvider extends MediaProvider {
                 break;
             case 'NetStream.Seek.Notify':
                 sendMediaEvent(MediaEvent.JWPLAYER_MEDIA_SEEKED);
+                break;
+            case 'NetStream.Buffer.Empty':
+                sendBufferEvent(0);
+                break;
+            case 'NetStream.Buffer.Full':
+                var bufferPercent:Number = 100;
+                if (_item.duration > 0) {
+                    bufferPercent = 100 * (_stream.time + _stream.bufferLength) / _item.duration;
+                }
+                sendBufferEvent(bufferPercent);
                 break;
         }
     }

@@ -1,27 +1,33 @@
 define([
     'api/config',
-    'api/api-deprecate',
     'controller/instream-adapter',
     'utils/underscore',
     'controller/Setup',
     'controller/captions',
     'controller/model',
+    'controller/storage',
     'playlist/playlist',
     'playlist/loader',
     'utils/helpers',
     'view/view',
+    'providers/providers',
     'utils/backbone.events',
     'events/change-state-event',
     'events/states',
     'events/events',
     'view/error'
-], function(Config, deprecateInit, InstreamAdapter, _, Setup, Captions,
-            Model, Playlist, PlaylistLoader, utils, View, Events, changeStateEvent, states, events, error) {
+], function(Config, InstreamAdapter, _, Setup, Captions, Model, Storage,
+            Playlist, PlaylistLoader, utils, View, Providers, Events, changeStateEvent, states, events, error) {
 
-    function _queue(command) {
-        return function() {
+    function _queueCommand(command) {
+        return function(){
             var args = Array.prototype.slice.call(arguments, 0);
-            this.eventsQueue.push([command, args]);
+
+            if (!this._model.getVideo()) {
+                this.eventsQueue.push([command, args]);
+            } else {
+                this['_'+command].apply(this, args);
+            }
         };
     }
 
@@ -42,23 +48,22 @@ define([
     };
 
     Controller.prototype = {
-        play : _queue('play'),
-        pause : _queue('pause'),
-        setVolume : _queue('setVolume'),
-        setMute : _queue('setMute'),
-        seek : _queue('seek'),
-        stop : _queue('stop'),
-        load : _queue('load'),
-        playlistNext : _queue('playlistNext'),
-        playlistPrev : _queue('playlistPrev'),
-        playlistItem : _queue('playlistItem'),
-        setFullscreen : _queue('setFullscreen'),
-        setCurrentCaptions : _queue('setCurrentCaptions'),
-        setCurrentQuality : _queue('setCurrentQuality'),
+        /** Controller API / public methods **/
+        play : _queueCommand('play'),
+        pause : _queueCommand('pause'),
+        seek : _queueCommand('seek'),
+        stop : _queueCommand('stop'),
+        load : _queueCommand('load'),
+        playlistNext : _queueCommand('next'),
+        playlistPrev : _queueCommand('prev'),
+        playlistItem : _queueCommand('item'),
+        setCurrentCaptions : _queueCommand('setCurrentCaptions'),
+        setCurrentQuality : _queueCommand('setCurrentQuality'),
+        setFullscreen : _queueCommand('setFullscreen'),
 
         setup : function(options, _api) {
 
-            var _model,
+            var _model = this._model,
                 _view,
                 _captions,
                 _setup,
@@ -70,9 +75,11 @@ define([
 
             var _video = function() { return _model.getVideo(); };
 
-            var config = new Config(options);
+            var storage = new Storage();
+            storage.track(_model);
+            var config = new Config(options, storage);
 
-            _model = this._model.setup(config);
+            _model.setup(config, storage);
             _view  = this._view  = new View(_api, _model);
             _captions = new Captions(_api, _model);
             _setup = new Setup(_api, _model, _view, _setPlaylist);
@@ -178,17 +185,13 @@ define([
                     });
                 });
 
-                _model.mediaController.on('all', _this.trigger.bind(_this));
-                _view.on('all', _this.trigger.bind(_this));
+                // Reset mediaType so that we get a change mediaType event
+                _model.mediaModel.set('mediaType', null);
+
+                _model.mediaController.on('all', _this.trigger, _this);
+                _view.on('all', _this.trigger, _this);
 
                 this.showView(_view.element());
-
-                // prevent video error in display on window close
-                window.addEventListener('beforeunload', function() {
-                    if (!_isCasting()) { // don't call stop while casting
-                        _stop(true);
-                    }
-                });
 
                 // Defer triggering of events until they can be registered
                 _.defer(_playerReadyNotify);
@@ -208,7 +211,7 @@ define([
                     index: _model.get('item'),
                     item: _model.get('playlistItem')
                 });
-                
+
                 _this.trigger(events.JWPLAYER_CAPTIONS_LIST, {
                     tracks: _model.get('captionsList'),
                     track: _model.get('captionsIndex')
@@ -218,11 +221,15 @@ define([
                     _play({reason: 'autostart'});
                 }
 
+                _executeQueuedEvents();
+            }
+
+            function _executeQueuedEvents() {
                 while (_this.eventsQueue.length > 0) {
                     var q = _this.eventsQueue.shift();
                     var method = q[0];
                     var args = q[1] || [];
-                    _this[method].apply(_this, args);
+                    _this['_'+method].apply(_this, args);
                 }
             }
 
@@ -241,6 +248,21 @@ define([
                         _loadPlaylist(item);
                         break;
                     case 'object':
+                        var playlist = Playlist(item);
+                        // TODO: edition logic only belongs in the commercial edition of the player
+                        var edition = _model.get('edition');
+                        var providersManager = _model.getProviders();
+                        var providersNeeded = providersManager.required(playlist, edition);
+
+                        Providers.load(providersNeeded, edition)
+                            .then(function() {
+                                if (!_this.getProvider()) {
+                                    _model.setProvider(_model.get('playlistItem'));
+
+                                    _executeQueuedEvents();
+                                }
+                            });
+
                         var success = _setPlaylist(item);
                         if (success) {
                             _setItem(0);
@@ -295,7 +317,7 @@ define([
                 }
                 if (!_preplay) {
                     _preplay = true;
-                    _this.trigger(events.JWPLAYER_MEDIA_BEFOREPLAY, {});
+                    _this.trigger(events.JWPLAYER_MEDIA_BEFOREPLAY, {'playReason': _model.get('playReason')});
                     _preplay = false;
                     if (_interruptPlay) {
                         _interruptPlay = false;
@@ -408,7 +430,7 @@ define([
             function _setPlaylist(p) {
                 var playlist = Playlist(p);
                 playlist = Playlist.filterPlaylist(playlist, _model.getProviders(), _model.get('androidhls'),
-                    _model.get('drm'), _model.get('preload'));
+                    _model.get('drm'), _model.get('preload'), _model.get('feedid'), _model.get('withCredentials'));
 
                 _model.set('playlist', playlist);
 
@@ -426,6 +448,7 @@ define([
                 var playlist = _model.get('playlist');
 
                 // If looping past the end, or before the beginning
+                index = parseInt(index, 10) || 0;
                 index = (index + playlist.length) % playlist.length;
 
                 _model.set('item', index);
@@ -470,8 +493,11 @@ define([
                 _next({reason: 'playlist'});
             }
 
-            function _setCurrentQuality(quality) {
-                _video().setCurrentQuality(quality);
+            function _setCurrentQuality(index) {
+                if (_video()) {
+                    index = parseInt(index, 10) || 0;
+                    _video().setCurrentQuality(index);
+                }
             }
 
             function _getCurrentQuality() {
@@ -518,7 +544,10 @@ define([
             }
 
             function _setCurrentAudioTrack(index) {
-                _video().setCurrentAudioTrack(index);
+                if(_video()) {
+                    index = parseInt(index, 10) || 0;
+                    _video().setCurrentAudioTrack(index);
+                }
             }
 
             function _getCurrentAudioTrack() {
@@ -536,8 +565,10 @@ define([
             }
 
             function _setCurrentCaptions(index) {
+                index = parseInt(index, 10) || 0;
+
                 // update provider subtitle track
-                _model.setVideoSubtitleTrack(index);
+                _model.persistVideoSubtitleTrack(index);
 
                 _this.trigger(events.JWPLAYER_CAPTIONS_CHANGED, {
                     tracks: _getCaptionsList(),
@@ -566,18 +597,10 @@ define([
                 return null;
             }
 
-            function _isCasting() {
-                var provider = _model.getVideo();
-                if (provider) {
-                    return provider.isCaster;
-                }
-                return false;
-            }
-
-            function _attachMedia(seekable) {
+            function _attachMedia() {
                 // Called after instream ends
                 var status = utils.tryCatch(function() {
-                    _model.getVideo().attachMedia(seekable);
+                    _model.getVideo().attachMedia();
                 });
 
                 if (status instanceof utils.Error) {
@@ -590,17 +613,29 @@ define([
                 }
             }
 
+            function _setFullscreen(state) {
+                if (!_.isBoolean(state)) {
+                    state = !_model.get('fullscreen');
+                }
+
+                _model.set('fullscreen', state);
+                if (this._instreamAdapter && this._instreamAdapter._adModel) {
+                    this._instreamAdapter._adModel.set('fullscreen', state);
+                }
+            }
+
             /** Controller API / public methods **/
-            this.play = _play;
-            this.pause = _pause;
-            this.seek = _seek;
-            this.stop = _stop;
-            this.load = _load;
-            this.playlistNext = _next;
-            this.playlistPrev = _prev;
-            this.playlistItem = _item;
-            this.setCurrentCaptions = _setCurrentCaptions;
-            this.setCurrentQuality = _setCurrentQuality;
+            this._play = _play;
+            this._pause = _pause;
+            this._seek = _seek;
+            this._stop = _stop;
+            this._load = _load;
+            this._next = _next;
+            this._prev = _prev;
+            this._item = _item;
+            this._setCurrentCaptions = _setCurrentCaptions;
+            this._setCurrentQuality = _setCurrentQuality;
+            this._setFullscreen = _setFullscreen;
 
             this.detachMedia = _detachMedia;
             this.attachMedia = _attachMedia;
@@ -616,8 +651,8 @@ define([
             this.getState = _getState;
 
             // Model passthroughs
-            this.setVolume = _model.setVolume;
-            this.setMute = _model.setMute;
+            this.setVolume = _model.setVolume.bind(_model);
+            this.setMute = _model.setMute.bind(_model);
             this.getProvider = function(){ return _model.get('provider'); };
             this.getWidth = function() { return _model.get('containerWidth'); };
             this.getHeight = function() { return _model.get('containerHeight'); };
@@ -629,17 +664,8 @@ define([
             //this.forceState = _view.forceState;
             //this.releaseState = _view.releaseState;
             this.setCues = _view.addCues;
+            this.setCaptions = _view.setCaptions;
 
-            this.setFullscreen = function(state) {
-                if (!_.isBoolean(state)) {
-                    state = !_model.get('fullscreen');
-                }
-
-                _model.set('fullscreen', state);
-                if (this._instreamAdapter && this._instreamAdapter._adModel) {
-                    this._instreamAdapter._adModel.set('fullscreen', state);
-                }
-            };
 
             this.addButton = function(img, tooltip, callback, id, btnClass) {
                 var btn = {
@@ -725,9 +751,6 @@ define([
                 }
             };
 
-            // This is here because it binds to the methods declared above
-            deprecateInit(_api, this);
-
             _setup.start();
         },
 
@@ -783,4 +806,3 @@ define([
 
     return Controller;
 });
-

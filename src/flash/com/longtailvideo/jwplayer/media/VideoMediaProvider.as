@@ -103,6 +103,8 @@ public class VideoMediaProvider extends MediaProvider {
             loadQuality();
         } else if (itm.preload === "auto") {
             play();
+        } else {
+            loadQuality();
         }
 
         // need to call this every time we load, but after setupVideo has been called
@@ -200,8 +202,8 @@ public class VideoMediaProvider extends MediaProvider {
             _video.height = data.height;
             resize(_config.width, _config.height);
         }
-        if (data.duration && item.duration < 1) {
-            item.duration = data.duration;
+        if (data.duration && _item.duration < 1) {
+            _item.duration = data.duration;
         }
         if (data.type == 'metadata' && !_keyframes) {
             if (data.seekpoints) {
@@ -237,7 +239,20 @@ public class VideoMediaProvider extends MediaProvider {
 
     /** Interval for the position progress **/
     protected function positionHandler():void {
-        var pos:Number = Math.round(Math.min(_stream.time, Math.max(item.duration, 0)) * 100) / 100;
+        var pos:Number = _stream.time;
+        var duration:Number = _item.duration;
+        if (duration <= 0 && pos === 0) {
+            // don't send time or buffer event until duration or position is known
+            return;
+        }
+        if (duration > 0) {
+            // VOD
+            pos = Math.min(pos, duration);
+        } else if (pos > 0) {
+            // Live Stream
+            duration = _item.duration = -1;
+        }
+        pos = Math.round(pos * 1000) / 1000;
         // Toggle state between buffering and playing.
         if (_stream.bufferLength < 1 && state == PlayerState.PLAYING && _buffered < 100) {
             if (_seeking) {
@@ -251,8 +266,12 @@ public class VideoMediaProvider extends MediaProvider {
         }
         // Send out buffer percentage.
         if (_buffered < 100) {
-            _buffered = Math.floor(100 * (_stream.bytesLoaded / _stream.bytesTotal + _offset.time / _item.duration));
-            _buffered = Math.min(100, _buffered);
+            var startOffset:Number = 0;
+            if (duration > 0) {
+                startOffset = _offset.time / duration;
+            }
+            var buffered:Number = _stream.bytesLoaded / _stream.bytesTotal;
+            _buffered = Math.floor(100 * (startOffset + buffered));
             sendBufferEvent(_buffered);
         }
         if (state === PlayerState.PLAYING && _position !== pos) {
@@ -260,9 +279,12 @@ public class VideoMediaProvider extends MediaProvider {
             if (_item.type == 'mp4') {
                 _position += _offset.time;
             }
+            if (duration < 0) {
+                duration = Infinity;
+            }
             sendMediaEvent(MediaEvent.JWPLAYER_MEDIA_TIME, {
-                position: _position,
-                duration: item.duration
+                position: pos,
+                duration: duration
             });
         }
     }
@@ -312,7 +334,7 @@ public class VideoMediaProvider extends MediaProvider {
         _keyframes = undefined;
         _offset = {time: 0, byte: 0};
 
-        var levels:Array = item.levels;
+        var levels:Array = _item.levels;
         if (_currentQuality >= levels.length) {
             error('no playable source');
             return;
@@ -321,7 +343,7 @@ public class VideoMediaProvider extends MediaProvider {
     }
 
     private function loadStream():void {
-        var levels:Array = item.levels;
+        var levels:Array = _item.levels;
         var url:String = Strings.getAbsolutePath(levels[_currentQuality].file);
         var prm:Number = _offset.byte;
         if (_item.type == 'mp4') {

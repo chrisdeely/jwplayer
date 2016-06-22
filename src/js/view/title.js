@@ -1,6 +1,7 @@
 define([
-    'utils/underscore'
-], function(_) {
+    'utils/underscore',
+    'utils/helpers',
+], function(_, utils) {
 
     var Title = function(_model) {
         this.model = _model;
@@ -29,6 +30,34 @@ define([
             if (this.model.get('playlistItem')) {
                 this.playlistItem(this.model, this.model.get('playlistItem'));
             }
+
+            this.model.on('change:logoWidth', this.update, this);
+            this.model.on('change:dock', this.update, this);
+        },
+
+        update: function(model) {
+            var titleStyle = {
+                paddingLeft:  0,
+                paddingRight: 0
+            };
+            var controls = model.get('controls');
+            var dockButtons = model.get('dock');
+            var logo = model.get('logo');
+            if (logo) {
+                // Only use Numeric or pixel ("Npx") margin values
+                var margin = 1*(''+logo.margin).replace('px', '');
+                var padding = model.get('logoWidth') + (isNaN(margin) ? 0 : margin);
+                if (logo.position ===  'top-left') {
+                    titleStyle.paddingLeft = padding;
+                } else if (logo.position ===  'top-right') {
+                    titleStyle.paddingRight = padding;
+                }
+            }
+            if (controls && dockButtons && dockButtons.length) {
+                var dockWidthGuess = 56 * dockButtons.length;
+                titleStyle.paddingRight = Math.max(titleStyle.paddingRight, dockWidthGuess);
+            }
+            utils.style(this.el, titleStyle);
         },
 
         playlistItem : function(model, item) {
